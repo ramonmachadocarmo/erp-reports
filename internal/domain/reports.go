@@ -31,6 +31,7 @@ type KitReportRow struct {
 	Cost           float64         `json:"cost"`
 	SuggestedPrice float64         `json:"suggested_price"`
 	MarginPercent  float64         `json:"margin_percent"`
+	Active         bool            `json:"active"`
 }
 
 type StockReportRow struct {
@@ -146,6 +147,7 @@ type Assembly struct {
 	Cost           float64
 	SuggestedPrice float64
 	MarginPercent  float64
+	Active         bool
 }
 
 type OrderItem struct {

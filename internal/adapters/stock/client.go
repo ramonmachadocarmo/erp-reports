@@ -72,6 +72,7 @@ type assemblyDTO struct {
 	Cost           float64           `json:"cost"`
 	SuggestedPrice float64           `json:"suggested_price"`
 	MarginPercent  float64           `json:"margin_percent"`
+	Active         bool              `json:"active"`
 }
 
 func (c *Client) Products(ctx context.Context) ([]domain.Product, error) {
@@ -129,7 +130,7 @@ func (c *Client) Assemblies(ctx context.Context) ([]domain.Assembly, error) {
 			items = append(items, domain.AssemblyItem{ProductID: it.ProductID, Quantity: it.Quantity, Role: it.Role})
 		}
 		assemblies = append(assemblies, domain.Assembly{
-			Code: a.Code, Name: a.Name, Items: items, Cost: a.Cost, SuggestedPrice: a.SuggestedPrice, MarginPercent: a.MarginPercent,
+			Code: a.Code, Name: a.Name, Items: items, Cost: a.Cost, SuggestedPrice: a.SuggestedPrice, MarginPercent: a.MarginPercent, Active: a.Active,
 		})
 	}
 	return assemblies, nil

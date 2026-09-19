@@ -106,7 +106,7 @@ func (s *Service) KitsReport(ctx context.Context) ([]domain.KitReportRow, error)
 			}
 		}
 		out = append(out, domain.KitReportRow{
-			Code: a.Code, Name: a.Name, Items: items, Cost: a.Cost, SuggestedPrice: a.SuggestedPrice, MarginPercent: a.MarginPercent,
+			Code: a.Code, Name: a.Name, Items: items, Cost: a.Cost, SuggestedPrice: a.SuggestedPrice, MarginPercent: a.MarginPercent, Active: a.Active,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Code < out[j].Code })
