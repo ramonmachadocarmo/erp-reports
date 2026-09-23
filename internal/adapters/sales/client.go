@@ -32,6 +32,8 @@ func New(base string) *Client {
 type orderItemDTO struct {
 	ProductID string  `json:"product_id"`
 	Quantity  float64 `json:"quantity"`
+	UnitPrice float64 `json:"unit_price"`
+	Subtotal  float64 `json:"subtotal"`
 }
 
 type orderDTO struct {
@@ -79,7 +81,7 @@ func (c *Client) Orders(ctx context.Context, from, to *time.Time) ([]domain.Sale
 	for _, o := range out {
 		items := make([]domain.OrderItem, 0, len(o.Items))
 		for _, it := range o.Items {
-			items = append(items, domain.OrderItem{ProductID: it.ProductID, Quantity: it.Quantity})
+			items = append(items, domain.OrderItem{ProductID: it.ProductID, Quantity: it.Quantity, UnitPrice: it.UnitPrice, Subtotal: it.Subtotal})
 		}
 		orders = append(orders, domain.SalesOrder{
 			ID: o.ID, CustomerID: o.CustomerID, Status: o.Status, TotalAmount: o.TotalAmount, Items: items, CreatedAt: o.CreatedAt,

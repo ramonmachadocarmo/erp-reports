@@ -53,6 +53,30 @@ type SalesReportRow struct {
 	TotalAmount  float64   `json:"total_amount"`
 }
 
+// CustomerRankingRow aggregates SalesOrder by customer — see
+// Service.CustomerRankingReport for why CANCELLED orders are excluded.
+type CustomerRankingRow struct {
+	CustomerName  string  `json:"customer_name"`
+	OrderCount    int     `json:"order_count"`
+	TotalAmount   float64 `json:"total_amount"`
+	AverageTicket float64 `json:"average_ticket"`
+}
+
+// ProductSalesRow aggregates sold order lines by product — same order data
+// SalesReport/CustomerRankingReport already fetch, grouped by product
+// instead. Amount comes from each line's own Subtotal (qty × unit price at
+// sale time), not the product's current sale price, so it reflects what was
+// actually invoiced. A kit line is counted as the kit's own product, not
+// expanded into its components — same as ItemSummary elsewhere.
+type ProductSalesRow struct {
+	SKU         string  `json:"sku"`
+	ProductName string  `json:"product_name"`
+	UoM         string  `json:"uom"`
+	Quantity    float64 `json:"quantity"`
+	TotalAmount float64 `json:"total_amount"`
+	OrderCount  int     `json:"order_count"`
+}
+
 type PurchaseReportRow struct {
 	OrderID      string    `json:"order_id"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -60,6 +84,55 @@ type PurchaseReportRow struct {
 	Status       string    `json:"status"`
 	ItemSummary  string    `json:"item_summary"`
 	TotalAmount  float64   `json:"total_amount"`
+}
+
+type LossReportRow struct {
+	SKU           string    `json:"sku"`
+	ProductName   string    `json:"product_name"`
+	WarehouseCode string    `json:"warehouse_code"`
+	WarehouseName string    `json:"warehouse_name"`
+	UoM           string    `json:"uom"`
+	Quantity      float64   `json:"quantity"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// CashflowReportRow is one contas-a-pagar/receber row: a scheduled or manual
+// cashflow-service entry, joined with the customer/supplier name behind its
+// SALE/PURCHASE reference (MANUAL entries have no party). Overdue is derived
+// here (Status == PENDING and DueDate has passed) rather than stored, since
+// cashflow-service itself never marks an entry late — it only flips PENDING
+// to CONFIRMED on payment.
+type CashflowReportRow struct {
+	DueDate           time.Time `json:"due_date"`
+	Direction         string    `json:"direction"`
+	Amount            float64   `json:"amount"`
+	Status            string    `json:"status"`
+	Overdue           bool      `json:"overdue"`
+	PartyName         string    `json:"party_name"`
+	PaymentMethodName string    `json:"payment_method_name"`
+	PaymentTermName   string    `json:"payment_term_name"`
+	InstallmentNo     int       `json:"installment_no"`
+	InstallmentsTotal int       `json:"installments_total"`
+	ReferenceType     string    `json:"reference_type"`
+	Description       string    `json:"description"`
+}
+
+// CashflowTimelineRow is one day of the realizado×projetado cash flow: the
+// same entries behind CashflowReportRow, grouped by due date and split by
+// Status (CONFIRMED = realizado, PENDING = projetado) instead of listed one
+// row per entry. Balance is the running cumulative net (realized+projected)
+// up to and including this day — mirrors cashflow-service's own
+// domain.Summarize, just keeping realized and projected apart instead of
+// merging them into one Net/Balance.
+type CashflowTimelineRow struct {
+	Date             string  `json:"date"`
+	RealizedInflow   float64 `json:"realized_inflow"`
+	RealizedOutflow  float64 `json:"realized_outflow"`
+	RealizedNet      float64 `json:"realized_net"`
+	ProjectedInflow  float64 `json:"projected_inflow"`
+	ProjectedOutflow float64 `json:"projected_outflow"`
+	ProjectedNet     float64 `json:"projected_net"`
+	Balance          float64 `json:"balance"`
 }
 
 type ForecastReportRow struct {
@@ -153,6 +226,8 @@ type Assembly struct {
 type OrderItem struct {
 	ProductID string
 	Quantity  float64
+	UnitPrice float64
+	Subtotal  float64
 }
 
 type SalesOrder struct {
@@ -178,6 +253,37 @@ type Person struct {
 	Name string
 }
 
+type Movement struct {
+	ProductID   string
+	WarehouseID string
+	Quantity    float64
+	CreatedAt   time.Time
+}
+
+// MovementFilter is pushed down to stock-service's GET /movements so the
+// dataset stays bounded — see stock-service's own domain.MovementFilter.
+type MovementFilter struct {
+	ProductID   string
+	WarehouseID string
+	Subtype     string
+	From        *time.Time
+	To          *time.Time
+}
+
+type CashflowEntry struct {
+	DueDate           time.Time
+	Amount            float64
+	Direction         string
+	Status            string
+	PaymentMethodName string
+	PaymentTermName   string
+	InstallmentNo     int
+	InstallmentsTotal int
+	ReferenceType     string
+	PartyID           string
+	Description       string
+}
+
 type StoragePlanLine struct {
 	ProductID   string
 	ForecastQty float64
@@ -198,6 +304,7 @@ type Catalog interface {
 	Balances(ctx context.Context) ([]Balance, error)
 	Warehouses(ctx context.Context) ([]Warehouse, error)
 	Assemblies(ctx context.Context) ([]Assembly, error)
+	Movements(ctx context.Context, f MovementFilter) ([]Movement, error)
 }
 
 type SalesHistory interface {
@@ -215,4 +322,8 @@ type Directory interface {
 
 type BI interface {
 	StoragePlan(ctx context.Context, coverageWeeks int, safetyPercent float64, lookbackWeeks int) ([]StoragePlanLine, error)
+}
+
+type Cashflow interface {
+	Entries(ctx context.Context) ([]CashflowEntry, error)
 }

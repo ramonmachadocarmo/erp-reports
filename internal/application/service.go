@@ -17,10 +17,11 @@ type Service struct {
 	purchasing domain.Purchasing
 	directory  domain.Directory
 	bi         domain.BI
+	cashflow   domain.Cashflow
 }
 
-func New(catalog domain.Catalog, sales domain.SalesHistory, purchasing domain.Purchasing, directory domain.Directory, bi domain.BI) *Service {
-	return &Service{catalog: catalog, sales: sales, purchasing: purchasing, directory: directory, bi: bi}
+func New(catalog domain.Catalog, sales domain.SalesHistory, purchasing domain.Purchasing, directory domain.Directory, bi domain.BI, cashflow domain.Cashflow) *Service {
+	return &Service{catalog: catalog, sales: sales, purchasing: purchasing, directory: directory, bi: bi, cashflow: cashflow}
 }
 
 func (s *Service) productLookup(ctx context.Context) (map[string]domain.Product, error) {
@@ -183,6 +184,106 @@ func (s *Service) SalesReport(ctx context.Context, from, to *time.Time) ([]domai
 	return out, nil
 }
 
+// CustomerRankingReport aggregates the same order data SalesReport lists one
+// row per order, grouped by customer instead. CANCELLED orders are excluded
+// since they never became real revenue.
+func (s *Service) CustomerRankingReport(ctx context.Context, from, to *time.Time) ([]domain.CustomerRankingRow, error) {
+	orders, err := s.sales.Orders(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	customers, err := s.directory.Customers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nameLookup := make(map[string]string, len(customers))
+	for _, c := range customers {
+		nameLookup[c.ID] = c.Name
+	}
+	type agg struct {
+		name  string
+		count int
+		total float64
+	}
+	byCustomer := make(map[string]*agg)
+	var order []string
+	for _, o := range orders {
+		if o.Status == "CANCELLED" {
+			continue
+		}
+		a, ok := byCustomer[o.CustomerID]
+		if !ok {
+			name := nameLookup[o.CustomerID]
+			if name == "" {
+				name = o.CustomerID
+			}
+			a = &agg{name: name}
+			byCustomer[o.CustomerID] = a
+			order = append(order, o.CustomerID)
+		}
+		a.count++
+		a.total += o.TotalAmount
+	}
+	out := make([]domain.CustomerRankingRow, 0, len(byCustomer))
+	for _, id := range order {
+		a := byCustomer[id]
+		var avg float64
+		if a.count > 0 {
+			avg = a.total / float64(a.count)
+		}
+		out = append(out, domain.CustomerRankingRow{CustomerName: a.name, OrderCount: a.count, TotalAmount: a.total, AverageTicket: avg})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TotalAmount > out[j].TotalAmount })
+	return out, nil
+}
+
+// ProductSalesReport aggregates the same order items ItemSummary already
+// walks, grouped by product instead of concatenated into one text column.
+// CANCELLED orders are excluded, same as CustomerRankingReport.
+func (s *Service) ProductSalesReport(ctx context.Context, from, to *time.Time) ([]domain.ProductSalesRow, error) {
+	orders, err := s.sales.Orders(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	products, err := s.productLookup(ctx)
+	if err != nil {
+		return nil, err
+	}
+	type agg struct {
+		qty    float64
+		amount float64
+		orders map[string]struct{}
+	}
+	byProduct := make(map[string]*agg)
+	var order []string
+	for _, o := range orders {
+		if o.Status == "CANCELLED" {
+			continue
+		}
+		for _, it := range o.Items {
+			a, ok := byProduct[it.ProductID]
+			if !ok {
+				a = &agg{orders: map[string]struct{}{}}
+				byProduct[it.ProductID] = a
+				order = append(order, it.ProductID)
+			}
+			a.qty += it.Quantity
+			a.amount += it.Subtotal
+			a.orders[o.ID] = struct{}{}
+		}
+	}
+	out := make([]domain.ProductSalesRow, 0, len(byProduct))
+	for _, id := range order {
+		a := byProduct[id]
+		p := products[id]
+		out = append(out, domain.ProductSalesRow{
+			SKU: p.SKU, ProductName: p.Name, UoM: uom(p), Quantity: a.qty, TotalAmount: a.amount, OrderCount: len(a.orders),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TotalAmount > out[j].TotalAmount })
+	return out, nil
+}
+
 // PurchasesReport filters by date in memory since purchasing-service's list
 // endpoint has no date params — cheaper than adding a new endpoint there for
 // what's normally a small, bounded dataset, and it still never touches
@@ -222,6 +323,159 @@ func (s *Service) PurchasesReport(ctx context.Context, from, to *time.Time) ([]d
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+// LossesReport pushes date/product/warehouse filtering down to stock-service's
+// GET /movements (subtype=LOSS) rather than filtering in memory, since
+// movements are a much larger, unbounded dataset than orders.
+func (s *Service) LossesReport(ctx context.Context, from, to *time.Time, productID, warehouseID string) ([]domain.LossReportRow, error) {
+	movements, err := s.catalog.Movements(ctx, domain.MovementFilter{
+		ProductID: productID, WarehouseID: warehouseID, Subtype: "LOSS", From: from, To: to,
+	})
+	if err != nil {
+		return nil, err
+	}
+	products, err := s.productLookup(ctx)
+	if err != nil {
+		return nil, err
+	}
+	warehouses, err := s.catalog.Warehouses(ctx)
+	if err != nil {
+		return nil, err
+	}
+	whLookup := make(map[string]domain.Warehouse, len(warehouses))
+	for _, w := range warehouses {
+		whLookup[w.ID] = w
+	}
+	out := make([]domain.LossReportRow, 0, len(movements))
+	for _, m := range movements {
+		p := products[m.ProductID]
+		w := whLookup[m.WarehouseID]
+		out = append(out, domain.LossReportRow{
+			SKU: p.SKU, ProductName: p.Name, WarehouseCode: w.Code, WarehouseName: w.Name,
+			UoM: uom(p), Quantity: m.Quantity, CreatedAt: m.CreatedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+// CashflowReport filters cashflow-service's entries (schedule + manual) in
+// memory, the same shortcut PurchasesReport takes: GET /entries has no query
+// params today and cashflow-service's own screen already fetches everything,
+// so the dataset is small and bounded enough not to need a new endpoint.
+func (s *Service) CashflowReport(ctx context.Context, from, to *time.Time, direction, status string, onlyOverdue bool) ([]domain.CashflowReportRow, error) {
+	entries, err := s.cashflow.Entries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	customers, err := s.directory.Customers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	suppliers, err := s.directory.Suppliers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	custLookup := make(map[string]string, len(customers))
+	for _, c := range customers {
+		custLookup[c.ID] = c.Name
+	}
+	supLookup := make(map[string]string, len(suppliers))
+	for _, sup := range suppliers {
+		supLookup[sup.ID] = sup.Name
+	}
+	now := time.Now()
+	out := make([]domain.CashflowReportRow, 0, len(entries))
+	for _, e := range entries {
+		if from != nil && e.DueDate.Before(*from) {
+			continue
+		}
+		if to != nil && e.DueDate.After(*to) {
+			continue
+		}
+		if direction != "" && e.Direction != direction {
+			continue
+		}
+		if status != "" && e.Status != status {
+			continue
+		}
+		overdue := e.Status == "PENDING" && e.DueDate.Before(now)
+		if onlyOverdue && !overdue {
+			continue
+		}
+		var partyName string
+		switch e.ReferenceType {
+		case "SALE":
+			partyName = custLookup[e.PartyID]
+		case "PURCHASE":
+			partyName = supLookup[e.PartyID]
+		}
+		out = append(out, domain.CashflowReportRow{
+			DueDate: e.DueDate, Direction: e.Direction, Amount: e.Amount, Status: e.Status, Overdue: overdue,
+			PartyName: partyName, PaymentMethodName: e.PaymentMethodName, PaymentTermName: e.PaymentTermName,
+			InstallmentNo: e.InstallmentNo, InstallmentsTotal: e.InstallmentsTotal,
+			ReferenceType: e.ReferenceType, Description: e.Description,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DueDate.Before(out[j].DueDate) })
+	return out, nil
+}
+
+// CashflowTimelineReport reuses the same cashflow-service entries as
+// CashflowReport, grouped by due date and split realizado (CONFIRMED) ×
+// projetado (PENDING) instead of listed one row per entry.
+func (s *Service) CashflowTimelineReport(ctx context.Context, from, to *time.Time) ([]domain.CashflowTimelineRow, error) {
+	entries, err := s.cashflow.Entries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	type agg struct {
+		realizedIn, realizedOut   float64
+		projectedIn, projectedOut float64
+	}
+	byDay := make(map[string]*agg)
+	var dates []string
+	for _, e := range entries {
+		if from != nil && e.DueDate.Before(*from) {
+			continue
+		}
+		if to != nil && e.DueDate.After(*to) {
+			continue
+		}
+		d := e.DueDate.UTC().Format("2006-01-02")
+		a, ok := byDay[d]
+		if !ok {
+			a = &agg{}
+			byDay[d] = a
+			dates = append(dates, d)
+		}
+		switch {
+		case e.Status == "CONFIRMED" && e.Direction == "IN":
+			a.realizedIn += e.Amount
+		case e.Status == "CONFIRMED":
+			a.realizedOut += e.Amount
+		case e.Direction == "IN":
+			a.projectedIn += e.Amount
+		default:
+			a.projectedOut += e.Amount
+		}
+	}
+	sort.Strings(dates)
+	var balance float64
+	out := make([]domain.CashflowTimelineRow, 0, len(dates))
+	for _, d := range dates {
+		a := byDay[d]
+		realizedNet := a.realizedIn - a.realizedOut
+		projectedNet := a.projectedIn - a.projectedOut
+		balance += realizedNet + projectedNet
+		out = append(out, domain.CashflowTimelineRow{
+			Date: d, RealizedInflow: a.realizedIn, RealizedOutflow: a.realizedOut, RealizedNet: realizedNet,
+			ProjectedInflow: a.projectedIn, ProjectedOutflow: a.projectedOut, ProjectedNet: projectedNet,
+			Balance: balance,
+		})
+	}
 	return out, nil
 }
 

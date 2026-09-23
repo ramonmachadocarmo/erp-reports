@@ -12,6 +12,7 @@ import (
 	"erp/pkg/config"
 	"erp/pkg/httpserver"
 	biclient "erp/services/reports-service/internal/adapters/bi"
+	cashflowclient "erp/services/reports-service/internal/adapters/cashflow"
 	configclient "erp/services/reports-service/internal/adapters/config"
 	httpadapter "erp/services/reports-service/internal/adapters/http"
 	purchasingclient "erp/services/reports-service/internal/adapters/purchasing"
@@ -35,6 +36,7 @@ func main() {
 		purchasingclient.New(cfg.PurchasingBaseURL),
 		configclient.New(cfg.ConfigBaseURL),
 		biclient.New(cfg.BiBaseURL),
+		cashflowclient.New(cfg.CashflowBaseURL),
 	)
 
 	engine := httpserver.New(cfg.ServiceName)

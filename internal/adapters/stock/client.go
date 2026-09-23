@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -134,6 +135,41 @@ func (c *Client) Assemblies(ctx context.Context) ([]domain.Assembly, error) {
 		})
 	}
 	return assemblies, nil
+}
+
+type movementDTO struct {
+	ProductID   string    `json:"product_id"`
+	WarehouseID string    `json:"warehouse_id"`
+	Quantity    float64   `json:"quantity"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func (c *Client) Movements(ctx context.Context, f domain.MovementFilter) ([]domain.Movement, error) {
+	q := url.Values{}
+	if f.ProductID != "" {
+		q.Set("product_id", f.ProductID)
+	}
+	if f.WarehouseID != "" {
+		q.Set("warehouse_id", f.WarehouseID)
+	}
+	if f.Subtype != "" {
+		q.Set("subtype", f.Subtype)
+	}
+	if f.From != nil {
+		q.Set("from", f.From.Format(time.RFC3339))
+	}
+	if f.To != nil {
+		q.Set("to", f.To.Format(time.RFC3339))
+	}
+	var out []movementDTO
+	if err := c.get(ctx, "/movements?"+q.Encode(), &out); err != nil {
+		return nil, err
+	}
+	movements := make([]domain.Movement, 0, len(out))
+	for _, m := range out {
+		movements = append(movements, domain.Movement{ProductID: m.ProductID, WarehouseID: m.WarehouseID, Quantity: m.Quantity, CreatedAt: m.CreatedAt})
+	}
+	return movements, nil
 }
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
