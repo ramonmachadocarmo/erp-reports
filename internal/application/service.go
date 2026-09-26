@@ -141,6 +141,7 @@ func (s *Service) StockReport(ctx context.Context, warehouseID string) ([]domain
 		out = append(out, domain.StockReportRow{
 			SKU: p.SKU, ProductName: p.Name, WarehouseCode: w.Code, WarehouseName: w.Name,
 			UoM: uom(p), QuantityAvailable: b.QuantityAvailable, QuantityReserved: b.QuantityReserved,
+			PurchaseValue: b.QuantityAvailable * p.PurchasePrice, SaleValue: b.QuantityAvailable * p.SalePrice,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -185,8 +186,11 @@ func (s *Service) SalesReport(ctx context.Context, from, to *time.Time) ([]domai
 }
 
 // CustomerRankingReport aggregates the same order data SalesReport lists one
-// row per order, grouped by customer instead. CANCELLED orders are excluded
-// since they never became real revenue.
+// row per order, grouped by customer instead. CANCELLED orders don't count as
+// revenue (OrderCount/TotalAmount skip them) but are tracked in
+// CancelledCount rather than dropped outright — a customer whose orders are
+// all cancelled still shows up, with OrderCount 0. Backs both Relatórios >
+// Ranking de clientes and the CRM customer list.
 func (s *Service) CustomerRankingReport(ctx context.Context, from, to *time.Time) ([]domain.CustomerRankingRow, error) {
 	orders, err := s.sales.Orders(ctx, from, to)
 	if err != nil {
@@ -196,21 +200,24 @@ func (s *Service) CustomerRankingReport(ctx context.Context, from, to *time.Time
 	if err != nil {
 		return nil, err
 	}
+	overdue, err := s.overdueByCustomer(ctx)
+	if err != nil {
+		return nil, err
+	}
 	nameLookup := make(map[string]string, len(customers))
 	for _, c := range customers {
 		nameLookup[c.ID] = c.Name
 	}
 	type agg struct {
-		name  string
-		count int
-		total float64
+		name      string
+		count     int
+		total     float64
+		cancelled int
+		lastOrder time.Time
 	}
 	byCustomer := make(map[string]*agg)
 	var order []string
 	for _, o := range orders {
-		if o.Status == "CANCELLED" {
-			continue
-		}
 		a, ok := byCustomer[o.CustomerID]
 		if !ok {
 			name := nameLookup[o.CustomerID]
@@ -220,6 +227,13 @@ func (s *Service) CustomerRankingReport(ctx context.Context, from, to *time.Time
 			a = &agg{name: name}
 			byCustomer[o.CustomerID] = a
 			order = append(order, o.CustomerID)
+		}
+		if o.CreatedAt.After(a.lastOrder) {
+			a.lastOrder = o.CreatedAt
+		}
+		if o.Status == "CANCELLED" {
+			a.cancelled++
+			continue
 		}
 		a.count++
 		a.total += o.TotalAmount
@@ -231,10 +245,101 @@ func (s *Service) CustomerRankingReport(ctx context.Context, from, to *time.Time
 		if a.count > 0 {
 			avg = a.total / float64(a.count)
 		}
-		out = append(out, domain.CustomerRankingRow{CustomerName: a.name, OrderCount: a.count, TotalAmount: a.total, AverageTicket: avg})
+		out = append(out, domain.CustomerRankingRow{
+			CustomerID: id, CustomerName: a.name, OrderCount: a.count, TotalAmount: a.total,
+			AverageTicket: avg, CancelledCount: a.cancelled, LastOrderAt: lastOrderPtr(a.lastOrder),
+			OverdueAmount: overdue[id],
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].TotalAmount > out[j].TotalAmount })
 	return out, nil
+}
+
+// CustomerDetailReport is the CRM drill-down behind one CustomerRankingReport row: the same
+// aggregate scoped to a single customer, plus their full order history (from/to scoped, like
+// SalesReport — OverdueAmount stays independent of that window, same as in the ranking).
+func (s *Service) CustomerDetailReport(ctx context.Context, customerID string, from, to *time.Time) (domain.CustomerDetailReport, error) {
+	orders, err := s.sales.Orders(ctx, from, to)
+	if err != nil {
+		return domain.CustomerDetailReport{}, err
+	}
+	products, err := s.productLookup(ctx)
+	if err != nil {
+		return domain.CustomerDetailReport{}, err
+	}
+	customers, err := s.directory.Customers(ctx)
+	if err != nil {
+		return domain.CustomerDetailReport{}, err
+	}
+	overdue, err := s.overdueByCustomer(ctx)
+	if err != nil {
+		return domain.CustomerDetailReport{}, err
+	}
+	name := customerID
+	for _, c := range customers {
+		if c.ID == customerID {
+			name = c.Name
+			break
+		}
+	}
+	var count int
+	var total float64
+	var cancelled int
+	var lastOrder time.Time
+	rows := make([]domain.SalesReportRow, 0)
+	for _, o := range orders {
+		if o.CustomerID != customerID {
+			continue
+		}
+		if o.CreatedAt.After(lastOrder) {
+			lastOrder = o.CreatedAt
+		}
+		if o.Status == "CANCELLED" {
+			cancelled++
+		} else {
+			count++
+			total += o.TotalAmount
+		}
+		rows = append(rows, domain.SalesReportRow{
+			OrderID: o.ID, CreatedAt: o.CreatedAt, CustomerName: name, Status: o.Status,
+			ItemSummary: itemSummary(o.Items, products), TotalAmount: o.TotalAmount,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].CreatedAt.After(rows[j].CreatedAt) })
+	var avg float64
+	if count > 0 {
+		avg = total / float64(count)
+	}
+	return domain.CustomerDetailReport{
+		CustomerID: customerID, CustomerName: name, OrderCount: count, TotalAmount: total,
+		AverageTicket: avg, CancelledCount: cancelled, LastOrderAt: lastOrderPtr(lastOrder),
+		OverdueAmount: overdue[customerID], Orders: rows,
+	}, nil
+}
+
+// overdueByCustomer sums cashflow-service's still-PENDING, past-due SALE entries per customer —
+// same overdue definition CashflowReport uses (Status == PENDING && DueDate before now).
+func (s *Service) overdueByCustomer(ctx context.Context) (map[string]float64, error) {
+	entries, err := s.cashflow.Entries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	out := make(map[string]float64)
+	for _, e := range entries {
+		if e.ReferenceType != "SALE" || e.Status != "PENDING" || !e.DueDate.Before(now) {
+			continue
+		}
+		out[e.PartyID] += e.Amount
+	}
+	return out, nil
+}
+
+func lastOrderPtr(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 // ProductSalesReport aggregates the same order items ItemSummary already
@@ -355,6 +460,7 @@ func (s *Service) LossesReport(ctx context.Context, from, to *time.Time, product
 		out = append(out, domain.LossReportRow{
 			SKU: p.SKU, ProductName: p.Name, WarehouseCode: w.Code, WarehouseName: w.Name,
 			UoM: uom(p), Quantity: m.Quantity, CreatedAt: m.CreatedAt,
+			PurchaseValue: m.Quantity * p.PurchasePrice, SaleValue: m.Quantity * p.SalePrice,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })

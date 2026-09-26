@@ -43,6 +43,7 @@ type productDTO struct {
 	SaleUoM        string             `json:"sale_uom"`
 	StockUoM       string             `json:"stock_uom"`
 	PurchasePrice  float64            `json:"purchase_price"`
+	SalePrice      float64            `json:"sale_price"`
 	PurchaseUoM    string             `json:"purchase_uom"`
 	UoMConversions []uomConversionDTO `json:"uom_conversions"`
 }
@@ -89,7 +90,7 @@ func (c *Client) Products(ctx context.Context) ([]domain.Product, error) {
 		}
 		products = append(products, domain.Product{
 			ID: p.ID, SKU: p.SKU, Name: p.Name, Kind: p.Kind, SaleUoM: p.SaleUoM, StockUoM: p.StockUoM,
-			PurchasePrice: p.PurchasePrice, PurchaseUoM: p.PurchaseUoM, Conversions: convs,
+			PurchasePrice: p.PurchasePrice, SalePrice: p.SalePrice, PurchaseUoM: p.PurchaseUoM, Conversions: convs,
 		})
 	}
 	return products, nil

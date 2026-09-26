@@ -32,6 +32,7 @@ func (h *Handler) Register(r *gin.Engine, jwt gin.HandlerFunc) {
 	api.GET("/stock", h.stock)
 	api.GET("/sales", h.sales)
 	api.GET("/customer-ranking", h.customerRanking)
+	api.GET("/customer-ranking/:id", h.customerDetail)
 	api.GET("/product-sales", h.productSales)
 	api.GET("/purchases", h.purchases)
 	api.GET("/losses", h.losses)
@@ -114,6 +115,15 @@ func (h *Handler) sales(c *gin.Context) {
 
 func (h *Handler) customerRanking(c *gin.Context) {
 	out, err := h.svc.CustomerRankingReport(h.withAuth(c), timeQuery(c, "from"), timeQuery(c, "to"))
+	if err != nil {
+		httpserver.Error(c, http.StatusBadGateway, err)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (h *Handler) customerDetail(c *gin.Context) {
+	out, err := h.svc.CustomerDetailReport(h.withAuth(c), c.Param("id"), timeQuery(c, "from"), timeQuery(c, "to"))
 	if err != nil {
 		httpserver.Error(c, http.StatusBadGateway, err)
 		return

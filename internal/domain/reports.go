@@ -34,6 +34,9 @@ type KitReportRow struct {
 	Active         bool            `json:"active"`
 }
 
+// StockReportRow's PurchaseValue/SaleValue are QuantityAvailable priced at the product's current
+// purchase/sale price — reserved stock is excluded since it's already committed to an order, not
+// free inventory value.
 type StockReportRow struct {
 	SKU               string  `json:"sku"`
 	ProductName       string  `json:"product_name"`
@@ -42,6 +45,8 @@ type StockReportRow struct {
 	UoM               string  `json:"uom"`
 	QuantityAvailable float64 `json:"quantity_available"`
 	QuantityReserved  float64 `json:"quantity_reserved"`
+	PurchaseValue     float64 `json:"purchase_value"`
+	SaleValue         float64 `json:"sale_value"`
 }
 
 type SalesReportRow struct {
@@ -54,12 +59,38 @@ type SalesReportRow struct {
 }
 
 // CustomerRankingRow aggregates SalesOrder by customer — see
-// Service.CustomerRankingReport for why CANCELLED orders are excluded.
+// Service.CustomerRankingReport. OrderCount/TotalAmount/AverageTicket cover
+// non-CANCELLED orders only (real revenue); CancelledCount is tracked
+// separately instead of just excluded, so a customer visible only through
+// cancellations (0 valid orders) still shows up — used by the CRM customer
+// list, not just the Relatórios > Ranking de clientes table. LastOrderAt is
+// nil only if that's somehow impossible (every row implies ≥1 order).
+// OverdueAmount is that customer's still-PENDING, past-due receivables from
+// cashflow-service — independent of the from/to order window.
 type CustomerRankingRow struct {
-	CustomerName  string  `json:"customer_name"`
-	OrderCount    int     `json:"order_count"`
-	TotalAmount   float64 `json:"total_amount"`
-	AverageTicket float64 `json:"average_ticket"`
+	CustomerID     string     `json:"customer_id"`
+	CustomerName   string     `json:"customer_name"`
+	OrderCount     int        `json:"order_count"`
+	TotalAmount    float64    `json:"total_amount"`
+	AverageTicket  float64    `json:"average_ticket"`
+	CancelledCount int        `json:"cancelled_count"`
+	LastOrderAt    *time.Time `json:"last_order_at"`
+	OverdueAmount  float64    `json:"overdue_amount"`
+}
+
+// CustomerDetailReport is the CRM drill-down behind one row of
+// CustomerRankingReport: the same aggregate, scoped to a single customer,
+// plus their full order history (same row shape SalesReport uses).
+type CustomerDetailReport struct {
+	CustomerID     string           `json:"customer_id"`
+	CustomerName   string           `json:"customer_name"`
+	OrderCount     int              `json:"order_count"`
+	TotalAmount    float64          `json:"total_amount"`
+	AverageTicket  float64          `json:"average_ticket"`
+	CancelledCount int              `json:"cancelled_count"`
+	LastOrderAt    *time.Time       `json:"last_order_at"`
+	OverdueAmount  float64          `json:"overdue_amount"`
+	Orders         []SalesReportRow `json:"orders"`
 }
 
 // ProductSalesRow aggregates sold order lines by product — same order data
@@ -86,6 +117,8 @@ type PurchaseReportRow struct {
 	TotalAmount  float64   `json:"total_amount"`
 }
 
+// LossReportRow's PurchaseValue/SaleValue are the lost Quantity priced at the product's current
+// purchase/sale price — the real cost lost and the revenue that would have been made, respectively.
 type LossReportRow struct {
 	SKU           string    `json:"sku"`
 	ProductName   string    `json:"product_name"`
@@ -93,6 +126,8 @@ type LossReportRow struct {
 	WarehouseName string    `json:"warehouse_name"`
 	UoM           string    `json:"uom"`
 	Quantity      float64   `json:"quantity"`
+	PurchaseValue float64   `json:"purchase_value"`
+	SaleValue     float64   `json:"sale_value"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -155,6 +190,7 @@ type Product struct {
 	SaleUoM       string
 	StockUoM      string
 	PurchasePrice float64
+	SalePrice     float64
 	PurchaseUoM   string
 	Conversions   []UoMConversion
 }
